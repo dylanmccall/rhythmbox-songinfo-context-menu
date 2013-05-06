@@ -512,19 +512,32 @@ rb_browser_source_populate (RBBrowserSource *source)
 	g_object_unref (entry_type);
 }
 
-static void
-browse_property (RBBrowserSource *source, RhythmDBPropType prop)
-{
-	GList *props;
+/**
+ * rb_browser_source_set_browse_property:
+ * @source: a RBSource
+ * @prop: property for which to browse
+ * @props: a list of property values, for example from rb_source_gather_selected_properties
+ *
+ * Causes the browser source to filter by the specified property, if possible.
+ */
+void
+rb_browser_source_set_browse_property (RBBrowserSource *source, RhythmDBPropType prop, GList *props) {
 	RBPropertyView *view;
 
-	props = rb_source_gather_selected_properties (RB_SOURCE (source), prop);
 	view = rb_library_browser_get_property_view (source->priv->browser, prop);
 	if (view) {
 		rb_property_view_set_selection (view, props);
 	}
+}
 
-	rb_list_deep_free (props);
+static void
+browse_property (RBBrowserSource *source, RhythmDBPropType prop)
+{
+	GList *prop_values;
+
+	prop_values = rb_source_gather_selected_properties (RB_SOURCE (source), prop);
+	rb_browser_source_set_browse_property(source, prop, prop_values);
+	rb_list_deep_free (prop_values);
 }
 
 static void

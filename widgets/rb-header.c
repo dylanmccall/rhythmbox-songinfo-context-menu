@@ -46,6 +46,7 @@
 #include "rb-fading-image.h"
 #include "rb-file-helpers.h"
 #include "rb-ext-db.h"
+#include "rb-library-source.h"
 
 /**
  * SECTION:rb-header
@@ -91,15 +92,24 @@ static void time_button_clicked_cb (GtkWidget *button, RBHeader *header);
 
 static void rb_header_elapsed_changed_cb (RBShellPlayer *player, gint64 elapsed, RBHeader *header);
 static void rb_header_extra_metadata_cb (RhythmDB *db, RhythmDBEntry *entry, const char *property_name, const GValue *metadata, RBHeader *header);
+static char * get_playing_title(RBHeader *header, char **stream_name);
+static char * get_playing_album(RBHeader *header);
+static char * get_playing_artist(RBHeader *header);
 static void rb_header_sync (RBHeader *header);
 static void rb_header_sync_time (RBHeader *header);
 
 static void uri_dropped_cb (RBFadingImage *image, const char *uri, RBHeader *header);
 static void pixbuf_dropped_cb (RBFadingImage *image, GdkPixbuf *pixbuf, RBHeader *header);
-static void image_button_press_cb (GtkWidget *widget, GdkEvent *event, RBHeader *header);
+static gboolean image_button_press_cb (GtkWidget *widget, GdkEvent *event, RBHeader *header);
 static void art_added_cb (RBExtDB *db, RBExtDBKey *key, const char *filename, GValue *data, RBHeader *header);
 static void volume_widget_changed_cb (GtkScaleButton *widget, gdouble volume, RBHeader *header);
 static void player_volume_changed_cb (RBShellPlayer *player, GParamSpec *pspec, RBHeader *header);
+
+static gboolean songbox_button_press_cb (GtkWidget *widget, GdkEventButton *event, RBHeader *header);
+static gboolean songbox_popup_menu_cb (GtkWidget *widget, RBHeader *header);
+static void songbox_copy_activate_cb (GtkMenuItem *menuitem, RBHeader *header);
+static void songbox_search_artist_activate_cb (GtkMenuItem *menuitem, RBHeader *header);
+static void songbox_search_album_activate_cb (GtkMenuItem *menuitem, RBHeader *header);
 
 struct RBHeaderPrivate
 {
@@ -112,6 +122,7 @@ struct RBHeaderPrivate
 	gulong status_changed_id;
 	gboolean showing_playback_status;
 
+	GtkWidget *songbox_wrapper;
 	GtkWidget *songbox;
 	GtkWidget *song;
 	GtkWidget *details;
@@ -327,20 +338,33 @@ rb_header_constructed (GObject *object)
 	gtk_widget_set_size_request (header->priv->scale, 150, -1);
 
 	/* set up song information labels */
+	header->priv->songbox_wrapper = gtk_event_box_new ();
+	gtk_event_box_set_visible_window (GTK_EVENT_BOX(header->priv->songbox_wrapper), FALSE);
+
+	g_signal_connect (header->priv->songbox_wrapper,
+			  "button-press-event",
+			  G_CALLBACK (songbox_button_press_cb),
+			  header);
+	g_signal_connect (header->priv->songbox_wrapper,
+			  "popup-menu",
+			  G_CALLBACK (songbox_popup_menu_cb),
+			  header);
+
 	header->priv->songbox = gtk_grid_new ();
 	gtk_widget_set_hexpand (header->priv->songbox, TRUE);
 	gtk_widget_set_valign (header->priv->songbox, GTK_ALIGN_CENTER);
+	gtk_container_add (GTK_CONTAINER (header->priv->songbox_wrapper), GTK_WIDGET (header->priv->songbox));
 
 	header->priv->song = gtk_label_new (" ");
 	gtk_label_set_use_markup (GTK_LABEL (header->priv->song), TRUE);
-	gtk_label_set_selectable (GTK_LABEL (header->priv->song), TRUE);
+	gtk_label_set_selectable (GTK_LABEL (header->priv->song), FALSE);
 	gtk_label_set_ellipsize (GTK_LABEL (header->priv->song), PANGO_ELLIPSIZE_END);
 	gtk_misc_set_alignment (GTK_MISC (header->priv->song), 0.0, 0.5);
 	gtk_grid_attach (GTK_GRID (header->priv->songbox), header->priv->song, 0, 0, 1, 1);
 
 	header->priv->details = gtk_label_new ("");
 	gtk_label_set_use_markup (GTK_LABEL (header->priv->details), TRUE);
-	gtk_label_set_selectable (GTK_LABEL (header->priv->details), TRUE);
+	gtk_label_set_selectable (GTK_LABEL (header->priv->details), FALSE);
 	gtk_label_set_ellipsize (GTK_LABEL (header->priv->details), PANGO_ELLIPSIZE_END);
 	gtk_widget_set_hexpand (header->priv->details, TRUE);
 	gtk_misc_set_alignment (GTK_MISC (header->priv->details), 0.0, 0.5);
@@ -391,7 +415,7 @@ rb_header_constructed (GObject *object)
 			  header);
 
 	gtk_grid_attach (GTK_GRID (header), header->priv->image, 0, 0, 1, 1);
-	gtk_grid_attach (GTK_GRID (header), header->priv->songbox, 2, 0, 1, 1);
+	gtk_grid_attach (GTK_GRID (header), header->priv->songbox_wrapper, 2, 0, 1, 1);
 	gtk_grid_attach (GTK_GRID (header), header->priv->timebutton, 3, 0, 1, 1);
 	gtk_grid_attach (GTK_GRID (header), header->priv->scale, 4, 0, 1, 1);
 	gtk_grid_attach (GTK_GRID (header), header->priv->volume_button, 5, 0, 1, 1);
@@ -613,7 +637,7 @@ rb_header_size_allocate (GtkWidget *widget, GtkAllocation *allocation)
 	}
 
 	/* time button gets its minimum size */
-	gtk_widget_get_preferred_width (RB_HEADER (widget)->priv->songbox, NULL, &info_width);
+	gtk_widget_get_preferred_width (RB_HEADER (widget)->priv->songbox_wrapper, NULL, &info_width);
 	if (gtk_widget_get_visible (RB_HEADER (widget)->priv->timelabel)) {
 		gtk_widget_get_preferred_width (RB_HEADER (widget)->priv->timebutton, &time_width, NULL);
 	} else {
@@ -633,7 +657,7 @@ rb_header_size_allocate (GtkWidget *widget, GtkAllocation *allocation)
 		child_alloc.width = info_width;
 		child_alloc.height = allocation->height;
 		gtk_widget_show (RB_HEADER (widget)->priv->songbox);
-		gtk_widget_size_allocate (RB_HEADER (widget)->priv->songbox, &child_alloc);
+		gtk_widget_size_allocate (RB_HEADER (widget)->priv->songbox_wrapper, &child_alloc);
 	} else {
 		gtk_widget_hide (RB_HEADER (widget)->priv->songbox);
 		info_width = 0;
@@ -780,55 +804,82 @@ get_extra_metadata (RhythmDB *db, RhythmDBEntry *entry, const char *field, char 
 	}
 }
 
+static char *
+get_playing_title(RBHeader *header, char **stream_name) {
+	const char *title;
+	char *streaming_title;
+
+	title = rhythmdb_entry_get_string (header->priv->entry, RHYTHMDB_PROP_TITLE);
+
+	get_extra_metadata (header->priv->db,
+			    header->priv->entry,
+			    RHYTHMDB_PROP_STREAM_SONG_TITLE,
+			    &streaming_title);
+	if (streaming_title) {
+		/* use entry title as stream name */
+		*stream_name = g_strdup(title);
+		return streaming_title;
+	} else {
+		return g_strdup(title);
+	}
+}
+
+static char *
+get_playing_album(RBHeader *header) {
+	const char *album;
+	char *streaming_album;
+
+	album = rhythmdb_entry_get_string (header->priv->entry, RHYTHMDB_PROP_ALBUM);
+
+	get_extra_metadata (header->priv->db,
+			    header->priv->entry,
+			    RHYTHMDB_PROP_STREAM_SONG_ALBUM,
+			    &streaming_album);
+	if (streaming_album) {
+		/* use entry title as stream name */
+		return streaming_album;
+	} else {
+		return g_strdup(album);
+	}
+}
+
+static char *
+get_playing_artist(RBHeader *header) {
+	const char *artist;
+	char *streaming_artist;
+
+	artist = rhythmdb_entry_get_string (header->priv->entry, RHYTHMDB_PROP_ARTIST);
+
+	get_extra_metadata (header->priv->db,
+			    header->priv->entry,
+			    RHYTHMDB_PROP_STREAM_SONG_ARTIST,
+			    &streaming_artist);
+	if (streaming_artist) {
+		/* use entry title as stream name */
+		return streaming_artist;
+	} else {
+		return g_strdup(artist);
+	}
+}
+
 static void
 rb_header_sync (RBHeader *header)
 {
 	char *label_text;
 	if (header->priv->entry != NULL) {
-		const char *title;
-		const char *album;
-		const char *artist;
-		const char *stream_name = NULL;
-		char *streaming_title;
-		char *streaming_artist;
-		char *streaming_album;
+		char *title;
+		char *album;
+		char *artist;
+		char *stream_name = NULL;
 		PangoDirection widget_dir;
 
 		rb_debug ("syncing with %s",
 			  rhythmdb_entry_get_string (header->priv->entry, RHYTHMDB_PROP_LOCATION));
 		gboolean have_duration = (header->priv->duration > 0);
 
-		title = rhythmdb_entry_get_string (header->priv->entry, RHYTHMDB_PROP_TITLE);
-		album = rhythmdb_entry_get_string (header->priv->entry, RHYTHMDB_PROP_ALBUM);
-		artist = rhythmdb_entry_get_string (header->priv->entry, RHYTHMDB_PROP_ARTIST);
-
-		get_extra_metadata (header->priv->db,
-				    header->priv->entry,
-				    RHYTHMDB_PROP_STREAM_SONG_TITLE,
-				    &streaming_title);
-		if (streaming_title) {
-			/* use entry title as stream name */
-			stream_name = title;
-			title = streaming_title;
-		}
-
-		get_extra_metadata (header->priv->db,
-				    header->priv->entry,
-				    RHYTHMDB_PROP_STREAM_SONG_ARTIST,
-				    &streaming_artist);
-		if (streaming_artist) {
-			/* override artist from entry */
-			artist = streaming_artist;
-		}
-
-		get_extra_metadata (header->priv->db,
-				    header->priv->entry,
-				    RHYTHMDB_PROP_STREAM_SONG_ALBUM,
-				    &streaming_album);
-		if (streaming_album) {
-			/* override album from entry */
-			album = streaming_album;
-		}
+		title = get_playing_title (header, &stream_name);
+		album = get_playing_album (header);
+		artist = get_playing_artist (header);
 
 		widget_dir = (gtk_widget_get_direction (GTK_WIDGET (header->priv->song)) == GTK_TEXT_DIR_LTR) ?
 			     PANGO_DIRECTION_LTR : PANGO_DIRECTION_RTL;
@@ -901,9 +952,9 @@ rb_header_sync (RBHeader *header)
 		gtk_widget_set_sensitive (header->priv->scale, have_duration && header->priv->seekable);
 		rb_header_sync_time (header);
 
-		g_free (streaming_artist);
-		g_free (streaming_album);
-		g_free (streaming_title);
+		g_free (artist);
+		g_free (album);
+		g_free (title);
 	} else {
 		rb_debug ("not playing");
 		label_text = g_markup_printf_escaped (TITLE_FORMAT, _("Not Playing"));
@@ -1258,12 +1309,13 @@ uri_dropped_cb (RBFadingImage *image, const char *uri, RBHeader *header)
 	rb_ext_db_key_free (key);
 }
 
-static void
+static gboolean
 image_button_press_cb (GtkWidget *widget, GdkEvent *event, RBHeader *header)
 {
-	if (event->button.type != GDK_2BUTTON_PRESS ||
-	    event->button.button != 1)
-		return;
+	if (event->button.button != 1)
+		return FALSE;
+	if (event->button.type != GDK_2BUTTON_PRESS)
+		return TRUE;
 
 	if (header->priv->image_path != NULL) {
 		GAppInfo *app;
@@ -1272,7 +1324,7 @@ image_button_press_cb (GtkWidget *widget, GdkEvent *event, RBHeader *header)
 
 		app = g_app_info_get_default_for_type ("image/jpeg", FALSE);
 		if (app == NULL) {
-			return;
+			return TRUE;
 		}
 
 		files = g_list_append (NULL, g_file_new_for_path (header->priv->image_path));
@@ -1283,6 +1335,8 @@ image_button_press_cb (GtkWidget *widget, GdkEvent *event, RBHeader *header)
 		g_object_unref (app);
 		g_list_free_full (files, g_object_unref);
 	}
+
+	return TRUE;
 }
 
 static void
@@ -1308,4 +1362,175 @@ player_volume_changed_cb (RBShellPlayer *player, GParamSpec *pspec, RBHeader *he
 	header->priv->syncing_volume = TRUE;
 	gtk_scale_button_set_value (GTK_SCALE_BUTTON (header->priv->volume_button), volume);
 	header->priv->syncing_volume = FALSE;
+}
+
+static void
+do_songbox_context_menu (RBHeader *header, GdkEventButton *event)
+{
+	GtkWidget *menu;
+	GtkWidget *copy_item, *search_artist_item, *search_album_item;
+	int button, event_time;
+	
+	menu = gtk_menu_new ();
+
+	gboolean is_playing = header->priv->entry != NULL;
+	
+	copy_item = gtk_menu_item_new_with_label (_("Copy Song Details"));
+	gtk_widget_set_sensitive (copy_item, is_playing);
+	g_signal_connect (copy_item,
+			  "activate",
+			  G_CALLBACK (songbox_copy_activate_cb),
+			  header);
+	gtk_menu_shell_append (GTK_MENU_SHELL (menu), GTK_WIDGET (copy_item));
+	
+	search_artist_item = gtk_menu_item_new_with_label(_("Browse this Artist"));
+	gtk_widget_set_sensitive (search_artist_item, is_playing);
+	g_signal_connect (search_artist_item,
+			  "activate",
+			  G_CALLBACK (songbox_search_artist_activate_cb),
+			  header);
+	gtk_menu_shell_append (GTK_MENU_SHELL (menu), GTK_WIDGET (search_artist_item));
+	
+	search_album_item = gtk_menu_item_new_with_label(_("Browse this Album"));
+	gtk_widget_set_sensitive (search_album_item, is_playing);
+	g_signal_connect (search_album_item,
+			  "activate",
+			  G_CALLBACK (songbox_search_album_activate_cb),
+			  header);
+	gtk_menu_shell_append (GTK_MENU_SHELL (menu), GTK_WIDGET (search_album_item));
+	
+	if (event)
+	{
+		button = event->button;
+		event_time = event->time;
+	}
+	else
+	{
+		button = 0;
+		event_time = gtk_get_current_event_time ();
+	}
+
+	gtk_widget_show_all(menu);
+	gtk_menu_attach_to_widget (GTK_MENU (menu), GTK_WIDGET (header), NULL);
+	gtk_menu_popup (GTK_MENU (menu), NULL, NULL, NULL, NULL, button, event_time);
+}
+    
+
+static gboolean
+songbox_button_press_cb (GtkWidget *widget, GdkEventButton *event, RBHeader *header)
+{
+	if (gdk_event_triggers_context_menu ((GdkEvent *) event) &&
+		event->type == GDK_BUTTON_PRESS)
+	{
+		do_songbox_context_menu (header, event);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static gboolean
+songbox_popup_menu_cb (GtkWidget *widget, RBHeader *header)
+{
+	do_songbox_context_menu (header, NULL);
+	return TRUE;
+}
+
+static void
+songbox_copy_activate_cb (GtkMenuItem *menuitem, RBHeader *header)
+{
+	if (header->priv->entry == NULL)
+		return;
+
+	GtkClipboard *clipboard;
+	char *title;
+	char *album;
+	char *artist;
+	char *stream_name = NULL;
+	char *clipboard_label;
+
+	clipboard = gtk_clipboard_get (GDK_SELECTION_CLIPBOARD);
+
+	title = get_playing_title (header, &stream_name);
+	album = get_playing_album (header);
+	artist = get_playing_artist (header);
+
+	if (artist == NULL || artist[0] == '\0') {
+		if (stream_name != NULL) {
+			clipboard_label = g_strdup_printf (STREAM_FORMAT, stream_name);
+		} else {
+			clipboard_label = "";
+		}
+	} else {
+		/* Translators: song details copied to clipboard: "song title: by artist from album" */
+		clipboard_label = g_strdup_printf (_("\"%s\", by %s from %s"), title, artist, album);
+	}
+
+	gtk_clipboard_set_text (clipboard, clipboard_label, -1);
+	
+	g_free (clipboard_label);
+	g_free (artist);
+	g_free (album);
+	g_free (title);
+}
+
+static void
+show_library_and_browse_property (RBHeader *header, RhythmDBPropType prop, gpointer prop_value)
+{
+	RBShell *shell;
+	RBSource *song_source;
+
+	song_source = header->priv->playing_source;
+	g_object_get (song_source, "shell", &shell, NULL);
+
+	if (RB_IS_SHELL (shell)) {
+		if (! RB_IS_BROWSER_SOURCE (song_source)) {
+			RBLibrarySource *library_source;
+
+			g_object_get (shell, "library-source", &library_source, NULL);
+
+			if (RB_IS_LIBRARY_SOURCE (library_source)) {
+				song_source = RB_SOURCE (library_source);
+			}
+		}
+
+		if (RB_IS_BROWSER_SOURCE (song_source)) {
+			GList *prop_values = NULL;
+
+			prop_values = g_list_append (prop_values, prop_value);
+			rb_browser_source_set_browse_property (RB_BROWSER_SOURCE (song_source), prop, prop_values);
+			g_list_free (prop_values);
+			
+			GError *error = NULL;
+			if (rb_shell_activate_source(shell,
+						     RB_SOURCE (song_source),
+						     RB_SHELL_ACTIVATION_SELECT,
+						     &error) == FALSE)
+			{
+				rb_debug ("couldn't activate library source: %s", error->message);
+				g_clear_error (&error);
+			} else {
+				rb_debug ("activated library source");
+			}
+		}
+	}
+}
+
+static void
+songbox_search_artist_activate_cb (GtkMenuItem *menuitem, RBHeader *header)
+{
+	char * artist;
+
+	artist = get_playing_artist(header);
+	show_library_and_browse_property (header, RHYTHMDB_PROP_ARTIST, artist);
+	g_free (artist);
+}
+
+static void
+songbox_search_album_activate_cb (GtkMenuItem *menuitem, RBHeader *header)
+{
+	char * album;
+
+	album = get_playing_album(header);
+	show_library_and_browse_property (header, RHYTHMDB_PROP_ALBUM, album);
+	g_free (album);
 }

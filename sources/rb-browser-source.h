@@ -70,6 +70,8 @@ GType		rb_browser_source_get_type		(void);
 
 gboolean	rb_browser_source_has_drop_support	(RBBrowserSource *source);
 
+void rb_browser_source_set_browse_property (RBBrowserSource *source, RhythmDBPropType prop, GList *props);
+
 G_END_DECLS
 
 #endif /* __RB_BROWSER_SOURCE_H */
